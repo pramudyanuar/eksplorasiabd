@@ -10,6 +10,16 @@ Sistem Informasi ITS
 ### 1. **Persiapan Database**
 ![CDM Database](images/image.png)
 link database : https://github.com/pthom/northwind_psql/tree/master
+setup user : 
+```sql
+-- Membuat user A dan user B
+CREATE USER user_a WITH PASSWORD 'passwordA';
+CREATE USER user_b WITH PASSWORD 'passwordB';
+
+-- Memberikan hak akses ke tabel products
+GRANT SELECT, INSERT, UPDATE, DELETE ON products TO user_a;
+GRANT SELECT, INSERT, UPDATE, DELETE ON products TO user_b;
+```
 
 ### 2. **Database Administration**
 **Pengertian**:  
@@ -480,5 +490,14 @@ Penguncian pada level kolom adalah tingkat penguncian yang paling granular, di m
 - **Kekurangan**: Sangat jarang digunakan karena kompleksitas pengelolaannya. PostgreSQL tidak mendukung penguncian field secara langsung.
 
 **Catatan**: PostgreSQL tidak mendukung penguncian field secara eksplisit. Penguncian ini sering kali dikelola oleh aplikasi pada level yang lebih tinggi, jika diperlukan.
+
+### 6. **Melepaskan Lock**
+Untuk membuka atau **membebaskan kunci (unlock)** dalam PostgreSQL, kunci dilepaskan secara otomatis ketika transaksi yang sedang berlangsung selesai dengan salah satu dari dua cara:
+
+1. **COMMIT**: Jika transaksi berhasil dan kita ingin menyimpan semua perubahan yang telah dilakukan, kita menggunakan `COMMIT`. Ini akan melepaskan semua kunci yang dipegang oleh transaksi tersebut.
+
+2. **ROLLBACK**: Jika ada kesalahan atau kita memutuskan untuk membatalkan perubahan yang dilakukan selama transaksi, kita menggunakan `ROLLBACK`. Ini juga akan membatalkan perubahan dan melepaskan semua kunci yang dipegang.
+
+Lock tidak perlu dibebaskan secara manual, karena PostgreSQL secara otomatis menangani pelepasan kunci setelah transaksi selesai dengan `COMMIT` atau `ROLLBACK`
 
 ---
