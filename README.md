@@ -187,19 +187,38 @@ Database Transaction adalah unit kerja yang dilakukan dalam satu rangkaian tinda
 - **Durability**: Setelah transaksi di-commit, hasil dari transaksi tersebut harus permanen, bahkan jika terjadi kegagalan sistem.
 
 **Contoh**:  
-Menambahkan pesanan baru beserta detailnya ke dalam tabel **orders** dan **order_details** menggunakan transaksi:
+Misalkan ada sebuah toko online yang menerima pesanan dari pelanggan. Saat pelanggan memesan 10 unit produk, sistem akan mengurangi stok produk di gudang sebesar 10 unit dan mencatat pesanan baru di tabel orders. Keduanya dilakukan dalam satu transaksi. Jika pengurangan stok dan pencatatan pesanan berhasil, maka transaksi akan di-commit dan perubahan disimpan di database. Namun, jika terjadi kegagalan, misalnya stok tidak bisa diperbarui karena kesalahan sistem, maka seluruh transaksi akan di-rollback, artinya stok dan pesanan tidak akan diubah, sehingga database tetap konsisten dan tidak ada data yang setengah jadi.
+
 ```sql
-BEGIN;
+BEGIN; -- Mulai transaksi utama
+-- Savepoint pertama
+SAVEPOINT sp1;
 
-INSERT INTO orders (order_id, customer_id, employee_id, order_date)
-VALUES (10001, 'CUST1', 1, '2024-10-13');
+-- Contoh query pertama
+INSERT INTO orders (order_id, customer_id, employee_id, order_date, freight)
+VALUES (2001, 'ANATR', 5, '2024-10-14', 100.00);
 
-INSERT INTO order_details (order_id, product_id, unit_price, quantity)
-VALUES (10001, 2, 20.00, 5);
+-- Jika terjadi error, rollback ke savepoint pertama tanpa menggagalkan seluruh transaksi
+EXCEPTION WHEN OTHERS THEN ROLLBACK TO sp1;
 
+-- Savepoint kedua
+SAVEPOINT sp2;
+
+-- Contoh query kedua
+UPDATE products
+SET units_in_stock = units_in_stock - 20
+WHERE product_id = 3;
+
+-- Jika ada error pada langkah ini, kembalikan hanya ke savepoint kedua
+EXCEPTION WHEN OTHERS THEN ROLLBACK TO sp2;
+
+-- Jika semua berhasil, commit transaksi utama
 COMMIT;
 ```
-Jika ada kesalahan selama proses, transaksi dapat di-*rollback* agar perubahan dibatalkan.
+
+---
+
+Berikut adalah versi yang dirapikan dari penjelasan tentang **Concurrency Control**, termasuk skenario multi-user dan lock granularity:
 
 ---
 
@@ -207,15 +226,192 @@ Jika ada kesalahan selama proses, transaksi dapat di-*rollback* agar perubahan d
 **Pengertian**:  
 Concurrency Control adalah mekanisme yang memastikan bahwa beberapa transaksi yang berjalan secara bersamaan tidak mengganggu satu sama lain, terutama ketika transaksi mengakses atau mengubah data yang sama. Tujuan dari concurrency control adalah menjaga **konsistensi** dan **integritas** data meskipun banyak pengguna atau aplikasi mengakses data secara bersamaan.
 
-**Contoh**:  
-Mengunci data pelanggan dengan **FOR UPDATE** agar transaksi lain tidak dapat mengubah data yang sama:
+Untuk memahami bagaimana **concurrency control** menangani masalah dalam skenario **multi-user**, mari lihat contoh di mana dua pengguna (User A dan User B) mengakses dan memperbarui data yang sama di basis data secara bersamaan. Kita menggunakan tabel **products**, yang menyimpan data stok barang. PostgreSQL menggunakan **locking** dan **transaction isolation levels** untuk mencegah masalah seperti **lost updates**, **uncommitted data**, dan **inconsistent retrievals**.
+
+### 1. **Skenario Lost Updates**
+Misalkan User A dan User B keduanya mencoba memperbarui stok produk yang sama pada waktu yang bersamaan. Tanpa pengendalian konkurensi, salah satu pembaruan bisa hilang. Berikut adalah contoh cara menggunakan **locking** untuk menghindari masalah ini.
+
+**User A** memulai transaksi untuk menambah stok produk, tetapi belum menyelesaikan transaksinya:
+
 ```sql
+-- User A
 BEGIN;
+SELECT units_in_stock FROM products WHERE product_id = 1 FOR UPDATE;  -- Mengunci baris
+-- Hasil: units_in_stock = 50
 
-SELECT * FROM customers WHERE customer_id = 'CUST1' FOR UPDATE;
+UPDATE products SET units_in_stock = units_in_stock + 10 WHERE product_id = 1;
+-- Stok sekarang menjadi 60, tapi belum di-commit
+```
 
-UPDATE customers SET city = 'New York' WHERE customer_id = 'CUST1';
+**User B** mencoba melakukan pembaruan stok pada produk yang sama saat transaksi **User A** belum di-commit:
 
+```sql
+-- User B
+BEGIN;
+SELECT units_in_stock FROM products WHERE product_id = 1 FOR UPDATE;  
+-- Transaksi ini akan menunggu karena baris telah dikunci oleh User A.
+```
+
+Setelah **User A** menyelesaikan transaksinya:
+
+```sql
+-- User A menyelesaikan transaksi
 COMMIT;
 ```
-Ini menghindari konflik ketika dua transaksi mencoba memperbarui baris yang sama secara bersamaan.
+
+Sekarang **User B** dapat melanjutkan pembaruan:
+
+```sql
+-- User B melanjutkan
+UPDATE products SET units_in_stock = units_in_stock - 5 WHERE product_id = 1;
+-- Stok sekarang menjadi 55
+COMMIT;
+```
+
+**Hasil**: Dengan penguncian (`FOR UPDATE`), PostgreSQL memastikan bahwa hanya satu transaksi yang dapat memperbarui stok pada suatu waktu, sehingga tidak ada pembaruan yang hilang.
+
+### 2. **Skenario Uncommitted Data (Dirty Read)**
+Dalam skenario ini, **User A** melakukan pembaruan data tetapi belum melakukan **COMMIT**, sementara **User B** mencoba membaca data yang belum dikonfirmasi oleh transaksi **User A**. Jika transaksi **User A** di-rollback, data yang dibaca oleh **User B** menjadi tidak valid (dirty read).
+
+**User A** memulai transaksi untuk memperbarui stok produk:
+
+```sql
+-- User A
+BEGIN;
+UPDATE products SET units_in_stock = 70 WHERE product_id = 1;  -- Belum di-commit
+-- Stok sementara menjadi 70
+```
+
+Jika **User B** menggunakan level isolasi rendah seperti **READ UNCOMMITTED**, dia bisa membaca data yang belum di-commit oleh **User A**:
+
+```sql
+-- User B dengan isolasi READ UNCOMMITTED (biasanya PostgreSQL default READ COMMITTED)
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+BEGIN;
+SELECT units_in_stock FROM products WHERE product_id = 1;  -- Membaca data yang belum di-commit
+-- Hasil: 70, meskipun belum di-commit oleh User A
+COMMIT;
+```
+
+Jika **User A** melakukan **ROLLBACK**:
+
+```sql
+-- User A membatalkan transaksi
+ROLLBACK;  
+-- Stok kembali menjadi 50
+```
+
+Data yang dibaca oleh **User B** (70) tidak valid karena perubahan itu dibatalkan.
+
+Untuk mencegah masalah ini, kita bisa menggunakan **READ COMMITTED** sebagai isolasi default di PostgreSQL. Dalam level isolasi ini, **User B** hanya dapat membaca data yang sudah di-commit:
+
+```sql
+-- User B dengan isolasi READ COMMITTED
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+
+BEGIN;
+SELECT units_in_stock FROM products WHERE product_id = 1;  -- Membaca data yang sudah di-commit
+-- Hasil: 50 (tidak membaca nilai 70 yang belum di-commit)
+COMMIT;
+```
+
+### 3. **Skenario Inconsistent Retrievals**
+Skenario ini melibatkan dua transaksi di mana **User A** sedang membaca data yang mencakup beberapa baris, sementara **User B** sedang memperbarui beberapa baris dari data yang sama secara bersamaan.
+
+**User A** sedang menghitung total stok dari semua produk:
+
+```sql
+-- User A
+BEGIN;
+SELECT SUM(units_in_stock) FROM products;  -- Total stok dari semua produk
+-- Hasil sementara: 150
+```
+
+Sementara itu, **User B** sedang memperbarui stok beberapa produk:
+
+```sql
+-- User B
+BEGIN;
+UPDATE products SET units_in_stock = units_in_stock + 10 WHERE product_id = 1;
+UPDATE products SET units_in_stock = units_in_stock - 5 WHERE product_id = 2;
+COMMIT;
+```
+
+Jika **User A** terus menghitung selama **User B** melakukan pembaruan, **User A** mungkin mendapatkan hasil yang tidak konsisten, karena sebagian data sudah diperbarui oleh **User B** sementara data lain belum.
+
+**Solusi**: Dengan menggunakan **REPEATABLE READ**, PostgreSQL memastikan bahwa **User A** selalu melihat snapshot yang konsisten dari data, meskipun ada transaksi lain yang memperbarui data selama transaksi **User A** berlangsung.
+
+```sql
+-- User A menggunakan REPEATABLE READ
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+
+BEGIN;
+SELECT SUM(units_in_stock) FROM products;  -- Membaca snapshot yang konsisten
+-- Hasil: 150, bahkan jika User B memperbarui data secara bersamaan
+COMMIT;
+```
+
+Dengan **REPEATABLE READ**, PostgreSQL memastikan bahwa **User A** tidak akan melihat perubahan yang dilakukan oleh **User B** hingga transaksi **User A** selesai.
+
+---
+
+### Lock Granularity
+**Lock Granularity** adalah konsep dalam pengendalian konkurensi yang menunjukkan tingkat atau level di mana penguncian (**lock**) diterapkan di dalam basis data. Semakin halus tingkat penguncian, semakin sedikit area basis data yang dikunci, tetapi lebih banyak biaya kinerja karena pengelolaan lebih banyak kunci. Berikut adalah berbagai level penguncian yang biasa digunakan dalam sistem basis data, termasuk PostgreSQL:
+
+### 1. **Database Level Lock (Penguncian pada Level Basis Data)**
+Pada level ini, seluruh basis data dikunci selama transaksi berlangsung. Ini adalah bentuk penguncian paling kasar, di mana satu transaksi akan mengunci seluruh basis data, mencegah transaksi lain mengakses atau memodifikasi bagian mana pun dari basis data selama transaksi tersebut belum selesai.
+
+- **Kelebihan**: Sederhana dan memastikan konsistensi global.
+- **Kekurangan**: Efisiensi rendah karena hanya satu transaksi yang bisa berjalan pada satu waktu. Transaksi lain harus menunggu, yang dapat menyebabkan bottleneck di lingkungan multi-user.
+
+**Contoh dalam PostgreSQL**:
+```sql
+-- Mengunci seluruh database
+LOCK DATABASE;
+```
+
+### 2. **Table Level Lock (Penguncian pada Level Tabel)**
+Pada level ini, satu tabel dikunci selama transaksi berlangsung. Penguncian tabel mencegah transaksi lain untuk mengakses atau memodifikasi tabel tersebut, tetapi transaksi lain masih bisa mengakses tabel yang berbeda.
+
+- **Kelebihan**: Mencegah konflik pada tabel yang sama, lebih efisien daripada mengunci seluruh basis data.
+- **Kekurangan**: Tetap menghambat transaksi lain yang hanya ingin bekerja pada sebagian kecil tabel.
+
+**Contoh dalam PostgreSQL**:
+```sql
+-- Mengunci tabel products untuk mencegah modifikasi oleh transaksi lain
+LOCK TABLE products IN EXCLUSIVE MODE;
+```
+
+### 3. **Page Level Lock (Penguncian pada Level Halaman)**
+Dalam basis data, data sering disimpan dalam blok atau halaman (pages). Pada level ini, satu halaman (blok data dalam disk) dikunci. Setiap halaman berisi beberapa baris data. Page level lock memungkinkan transaksi untuk mengunci satu blok halaman, bukan seluruh tabel.
+
+- **Kelebihan**: Lebih granular dibanding penguncian tabel, memungkinkan lebih banyak transaksi simultan.
+- **Kekurangan**: Bisa menyebabkan masalah jika banyak transaksi bekerja pada halaman yang sama, meskipun mereka mengakses baris yang berbeda.
+
+PostgreSQL tidak secara eksplisit mendukung penguncian pada level halaman sebagai fitur yang dapat dipanggil secara langsung oleh pengguna, karena penguncian halaman dilakukan secara internal oleh sistem untuk mengelola disk I/O.
+
+### 4. **Row Level Lock (Penguncian pada Level Baris)**
+Penguncian pada level baris memungkinkan satu transaksi mengunci satu baris dalam tabel. Ini memungkinkan lebih banyak fleksibilitas dan simultanitas karena transaksi lain dapat mengakses dan mengubah baris lain di tabel yang sama.
+
+- **Kelebihan**: Lebih granular, sehingga meningkatkan simultanitas dan efisiensi dalam lingkungan multi-user.
+- **Kekurangan**: Membutuhkan lebih banyak sumber daya untuk
+
+ mengelola penguncian banyak baris.
+
+**Contoh dalam PostgreSQL**:
+```sql
+-- Mengunci baris tertentu di tabel products
+BEGIN;
+SELECT * FROM products WHERE product_id = 1 FOR UPDATE;
+```
+
+### 5. **Field Level Lock (Penguncian pada Level Kolom atau Field)**
+Penguncian pada level kolom adalah tingkat penguncian yang paling granular, di mana hanya satu kolom (field) dari suatu baris yang dikunci, memungkinkan transaksi lain untuk memperbarui kolom lain pada baris yang sama.
+
+- **Kelebihan**: Penguncian yang sangat halus, memungkinkan simultanitas tingkat tinggi.
+- **Kekurangan**: Sangat jarang digunakan karena kompleksitas pengelolaannya. PostgreSQL tidak mendukung penguncian field secara langsung.
+
+**Catatan**: PostgreSQL tidak mendukung penguncian field secara eksplisit. Penguncian ini sering kali dikelola oleh aplikasi pada level yang lebih tinggi, jika diperlukan.
+
+---
