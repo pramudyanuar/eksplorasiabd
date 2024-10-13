@@ -215,18 +215,13 @@ EXCEPTION WHEN OTHERS THEN ROLLBACK TO sp2;
 -- Jika semua berhasil, commit transaksi utama
 COMMIT;
 ```
-
----
-
-Berikut adalah versi yang dirapikan dari penjelasan tentang **Concurrency Control**, termasuk skenario multi-user dan lock granularity:
-
 ---
 
 ### 4. **Concurrency Control**
 **Pengertian**:  
 Concurrency Control adalah mekanisme yang memastikan bahwa beberapa transaksi yang berjalan secara bersamaan tidak mengganggu satu sama lain, terutama ketika transaksi mengakses atau mengubah data yang sama. Tujuan dari concurrency control adalah menjaga **konsistensi** dan **integritas** data meskipun banyak pengguna atau aplikasi mengakses data secara bersamaan.
 
-Untuk memahami bagaimana **concurrency control** menangani masalah dalam skenario **multi-user**, mari lihat contoh di mana dua pengguna (User A dan User B) mengakses dan memperbarui data yang sama di basis data secara bersamaan. Kita menggunakan tabel **products**, yang menyimpan data stok barang. PostgreSQL menggunakan **locking** dan **transaction isolation levels** untuk mencegah masalah seperti **lost updates**, **uncommitted data**, dan **inconsistent retrievals**.
+Untuk memahami bagaimana **concurrency control** menangani masalah dalam skenario **multi-user**, mari lihat contoh di mana dua pengguna (User A dan User B) mengakses dan memperbarui data yang sama di basis data secara bersamaan. Kita menggunakan tabel **products**, yang menyimpan data stok barang. PostgreSQL menggunakan **locking** dan **transaction isolation levels** untuk mencegah masalah seperti **lost updates**, **uncommitted data**, **inconsistent retrievals**, **phantom reads**, dan **missing/double reads**.
 
 ### 1. **Skenario Lost Updates**
 Misalkan User A dan User B keduanya mencoba memperbarui stok produk yang sama pada waktu yang bersamaan. Tanpa pengendalian konkurensi, salah satu pembaruan bisa hilang. Berikut adalah contoh cara menggunakan **locking** untuk menghindari masalah ini.
@@ -354,7 +349,79 @@ COMMIT;
 
 Dengan **REPEATABLE READ**, PostgreSQL memastikan bahwa **User A** tidak akan melihat perubahan yang dilakukan oleh **User B** hingga transaksi **User A** selesai.
 
+### 4. **Skenario Phantom Reads**
+**Phantom Reads** terjadi ketika satu transaksi membaca beberapa baris sesuai dengan kriteria tertentu, kemudian transaksi lain memasukkan atau menghapus baris yang memenuhi kriteria tersebut, sehingga pada pembacaan ulang, transaksi pertama melihat "phantom" atau baris yang sebelumnya tidak ada.
+
+**Contoh Masalah**:
+- **User A** menjalankan query untuk membaca semua produk dengan stok lebih dari 100 unit.
+- **User B** kemudian menambahkan produk baru dengan stok lebih dari 100 unit.
+- Ketika **User A** menjalankan query yang sama, produk baru yang sebelumnya tidak ada muncul sebagai phantom.
+
+**User A** membaca produk dengan stok lebih dari 100 unit:
+
+```sql
+-- User A
+BEGIN;
+SELECT * FROM products WHERE units_in_stock > 100;
+-- Hasil: 3 baris
+```
+
+**User B** menambahkan produk baru dengan stok lebih dari 100 unit:
+
+```sql
+-- User B
+BEGIN;
+INSERT INTO products (product_id, product_name, units_in_stock) VALUES (5, 'New Product', 150);
+COMMIT;
+```
+
+Ketika **User A** membaca lagi, baris baru muncul:
+
+```sql
+-- User A membaca lagi
+SELECT * FROM products WHERE units_in_stock > 100;
+-- Hasil: 4 baris (termasuk produk yang ditambahkan oleh User B)
+```
+
+**Solusi**: Untuk menghindari **phantom reads**, gunakan level isolasi **SERIALIZABLE**, yang merupakan level isolasi tertinggi dan memastikan bahwa tidak ada transaksi lain yang bisa melakukan **INSERT** atau **DELETE** selama transaksi pertama berlangsung.
+
+```sql
+-- User A menggunakan SERIALIZABLE
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+
+BEGIN;
+SELECT * FROM products WHERE units_in_stock > 100;
+-- Transaksi lain tidak bisa menambah atau menghapus baris hingga transaksi ini selesai
+COMMIT;
+```
+
+### 5. **Skenario Missing dan Double Reads Akibat Pembaruan Baris**
+**Missing Reads** terjadi ketika satu transaksi memperbarui data yang sudah dibaca oleh transaksi lain, tetapi transaksi kedua tidak mendapatkan pembaruan tersebut karena belum menyelesaikan transaksi sebelumnya. **Double Reads** terjadi ketika satu transaksi membaca dua kali data yang sama, tetapi data tersebut berubah di antara dua pembacaan.
+
+**Contoh Masalah**:
+- **User A** membaca stok produk.
+- **User B** memperbarui stok produk setelah **User A** membacanya.
+- Ketika **User A** membaca lagi, stok produk yang baru diperbarui oleh **User B** bisa saja muncul dua kali (double read) atau tidak sesuai.
+
+**Solusi**: Menggunakan level isolasi **REPEATABLE READ** atau **SERIALIZABLE** untuk memastikan bahwa transaksi pertama akan membaca snapshot yang konsisten dari data, dan data yang dibaca tidak berubah selama transaksi berlangsung.
+
+```sql
+-- User A menggunakan REPEATABLE READ
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+
+BEGIN;
+SELECT * FROM products WHERE product_id = 1;
+
+
+-- User A akan melihat snapshot yang sama, meskipun User B memperbarui data
+COMMIT;
+```
+
+Dengan **REPEATABLE READ**, PostgreSQL memastikan bahwa **User A** akan mendapatkan hasil yang konsisten, meskipun transaksi lain memperbarui data selama transaksi berlangsung.
+
 ---
+
+Dengan demikian, **concurrency control** menggunakan berbagai teknik seperti **locking** dan **transaction isolation levels** untuk menangani masalah seperti **phantom reads**, **missing/double reads**, **lost updates**, **uncommitted data**, dan **inconsistent retrievals** dalam skenario multi-user.
 
 ### Lock Granularity
 **Lock Granularity** adalah konsep dalam pengendalian konkurensi yang menunjukkan tingkat atau level di mana penguncian (**lock**) diterapkan di dalam basis data. Semakin halus tingkat penguncian, semakin sedikit area basis data yang dikunci, tetapi lebih banyak biaya kinerja karena pengelolaan lebih banyak kunci. Berikut adalah berbagai level penguncian yang biasa digunakan dalam sistem basis data, termasuk PostgreSQL:
